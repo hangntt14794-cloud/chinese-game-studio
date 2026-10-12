@@ -998,21 +998,42 @@ const Core = (() => {
     });
     if (parsed.dialogues.length && allReplies.length < 3) notes.push('Hội thoại quá ngắn: cần ít nhất 3 lượt lời để tạo phương án nhiễu cho câu hỏi hội thoại.');
 
-    // 5) Trộn đều các dạng, loại trùng, cắt theo số lượng
+    // 5) Chọn câu: (a) mỗi từ vựng ít nhất một câu, (b) chia đều phần còn lại cho các dạng, loại trùng
+    const total = cfg.count || 20;
     const seen = new Set(); const out = [];
+    const qKey = (q) => q.type + '|' + q.stem + '|' + q.zh + '|' + (q.options[q.answer] || q.tokens.join(''));
+    const take = (q) => { const k = qKey(q); if (seen.has(k)) return false; seen.add(k); out.push(q); return true; };
     const keys = Object.keys(buckets).map(k => { buckets[k] = shuffle(buckets[k]); return k; });
+    const answerOf = (q) => String(q.options[q.answer] || q.tokens.join('') || '');
+    const coversWord = (q, w) => q.zh === w || answerOf(q) === w || (q.type === 'match' ? q.pairs.some(p => p.zh === w) : false);
+    const covered = new Set();
+    if (cfg.cover !== false && own.length) {
+      const rot = ['meaning', 'hanzi', 'listen', 'pinyin', 'py2zh', 'tf', 'guess'];
+      own.forEach((v, i) => {
+        if (out.length >= total) return;
+        const order = [...rot.slice(i % rot.length), ...rot.slice(0, i % rot.length)];
+        for (const t of order) { const b = buckets[t] || []; const k = b.findIndex(q => q.zh === v.hanzi || answerOf(q) === v.hanzi); if (k >= 0) { const q = b.splice(k, 1)[0]; if (take(q)) { covered.add(v.hanzi); return; } } }
+        for (const t of keys) { const b = buckets[t]; const k = b.findIndex(q => (q.zh || '').includes(v.hanzi) || answerOf(q) === v.hanzi); if (k >= 0) { const q = b.splice(k, 1)[0]; if (take(q)) { covered.add(v.hanzi); return; } } }
+      });
+    }
     let added = true;
-    while (out.length < (cfg.count || 20) && added) {
+    while (out.length < total && added) {
       added = false;
       for (const k of keys) {
         const q = buckets[k].shift(); if (!q) continue;
-        const key = q.type + '|' + q.stem + '|' + q.zh + '|' + (q.options[q.answer] || q.tokens.join(''));
-        if (seen.has(key)) continue; seen.add(key); out.push(q); added = true;
-        if (out.length >= (cfg.count || 20)) break;
+        if (!take(q)) { added = true; continue; } added = true;
+        if (out.length >= total) break;
       }
     }
+    own.forEach(v => { if (!covered.has(v.hanzi) && out.some(q => coversWord(q, v.hanzi) || (q.zh || '').includes(v.hanzi))) covered.add(v.hanzi); });
+    const missing = own.filter(v => !covered.has(v.hanzi)).map(v => v.hanzi);
+    const finalOut = shuffle(out);
     if (!out.length) notes.push('Không tạo được câu hỏi: dữ liệu chưa đủ (cần từ vựng có nghĩa, câu tiếng Trung hoặc câu hỏi có đáp án).');
-    return { questions: out, notes };
+    if (own.length && out.length) {
+      if (missing.length && out.length >= total) notes.push(`Số câu (${total}) ít hơn cần thiết: ${missing.length} từ chưa có câu hỏi. Hãy tăng số câu lên ít nhất ${own.length} để phủ hết.`);
+      else if (missing.length) notes.push(`${missing.length} từ không tạo được câu hỏi (thường do thiếu nghĩa và pinyin): ${missing.slice(0, 30).join('、')}${missing.length > 30 ? '…' : ''}`);
+    }
+    return { questions: finalOut, notes, coverage: { covered: own.length - missing.length, total: own.length, missing } };
   }
 
   /* ---------- CHUYỂN ĐỔI CÂU HỎI CHO TRÒ CHƠI ---------- */
@@ -1113,8 +1134,8 @@ const DEFAULT_SETTINGS = {
   ai: { provider: 'none', endpoint: '', model: '', key: '', remember: false },
   defaults: { timePerQ: 20, retries: 0, showPinyin: true, showVi: false, readAloud: false, explain: true, count: 10, autoNext: true },
 };
-const S = { settings: structuredClone(DEFAULT_SETTINGS), questions: [], vocab: [], sets: [], materials: [], classes: [], students: [], history: [], lessons: [] };
-const KEYS = ['settings', 'questions', 'vocab', 'sets', 'materials', 'classes', 'students', 'history', 'lessons'];
+const S = { settings: structuredClone(DEFAULT_SETTINGS), questions: [], vocab: [], sets: [], materials: [], classes: [], students: [], history: [], lessons: [], usage: {} };
+const KEYS = ['settings', 'questions', 'vocab', 'sets', 'materials', 'classes', 'students', 'history', 'lessons', 'usage'];
 
 const Store = {
   db: null, mode: 'idb', timers: {},
@@ -1449,7 +1470,7 @@ Pages.generator = () => {
         <div class="grid g3">
           <div class="field"><label class="f">Cấp độ</label><select id="cHsk">${hskOptions(c.hsk)}</select></div>
           <div class="field"><label class="f">Số câu</label><select id="cCount">${[5, 10, 20, 30, 50].map(n => `<option ${c.count === n ? 'selected' : ''}>${n}</option>`).join('')}<option value="custom" ${[5, 10, 20, 30, 50].includes(c.count) ? '' : 'selected'}>Tùy chỉnh…</option></select></div>
-          <div class="field"><label class="f">Tùy chỉnh</label><input type="number" id="cCountCustom" min="1" max="300" value="${c.count}"></div>
+          <div class="field"><label class="f">Tùy chỉnh</label><input type="number" id="cCountCustom" min="1" max="3000" value="${c.count}"></div>
           <div class="field"><label class="f">Chủ đề</label><select id="cTopic"><option value="">Tự động theo từng câu</option>${topicOptions(c.topic)}</select></div>
           <div class="field"><label class="f">Mức độ</label><select id="cDiff"><option value="easy" ${c.difficulty === 'easy' ? 'selected' : ''}>Dễ (3 lựa chọn)</option><option value="medium" ${c.difficulty === 'medium' ? 'selected' : ''}>Trung bình</option><option value="hard" ${c.difficulty === 'hard' ? 'selected' : ''}>Khó (nhiễu gần nghĩa/thanh)</option></select></div>
           <div class="field"><label class="f">Chế độ chơi</label><select id="cMode"><option value="individual" ${c.mode === 'individual' ? 'selected' : ''}>Cá nhân</option><option value="group" ${c.mode === 'group' ? 'selected' : ''}>Thi đua nhóm</option><option value="class" ${c.mode === 'class' ? 'selected' : ''}>Cả lớp</option></select></div>
@@ -1473,13 +1494,13 @@ Pages.generator = () => {
         </div>
       </div>
       <div class="card">
-        <div class="row between"><h3 style="margin:0">3. Xem lại và duyệt (${Gen.questions.length} câu)</h3>
+        <div class="row between"><h3 style="margin:0">3. Xem lại và duyệt (${Gen.questions.length} câu)${Gen.coverage && Gen.coverage.total ? ` <span class="pill ${Gen.coverage.covered === Gen.coverage.total ? 'ok' : 'warn'}">Phủ ${Gen.coverage.covered}/${Gen.coverage.total} từ vựng</span>` : ''}</h3>
           <div class="row"><button class="btn sm" data-act="addQ">+ Thêm câu</button><button class="btn sm" data-act="approveAll" ${Gen.questions.length ? '' : 'disabled'}>✓ Duyệt tất cả</button></div></div>
         ${Gen.notes.length ? `<div class="notice warn small" style="margin-top:10px">${Gen.notes.map(esc).join('<br>')}</div>` : ''}
-        <div id="genList" style="margin-top:12px;max-height:70vh;overflow:auto">${Gen.questions.length ? Gen.questions.map((q, i) => `
+        <div id="genList" style="margin-top:12px;max-height:70vh;overflow:auto">${Gen.questions.length ? Gen.questions.slice(0, Gen.showN || 60).map((q, i) => `
           <div class="qcard"><div class="row between"><div class="row"><span class="pill t">${i + 1}</span><span class="pill v">${esc(Core.QTYPES[q.type])}</span><span class="pill">HSK ${q.hsk}</span><span class="pill">${esc(q.topic)}</span>${qStatusPills(q)}</div>
           <div class="row"><button class="iconbtn" title="Lên" data-act="up" data-i="${i}">↑</button><button class="iconbtn" title="Xuống" data-act="down" data-i="${i}">↓</button><button class="iconbtn" title="Sửa" data-act="editQ" data-i="${i}">✎</button><button class="iconbtn" title="Duyệt" data-act="ok" data-i="${i}">✓</button><button class="iconbtn" title="Xóa" data-act="delQ" data-i="${i}">🗑</button></div></div>
-          <div style="margin-top:6px">${qPreviewHTML(q)}</div><div class="tiny muted">Nguồn: ${esc(q.source)}</div></div>`).join('') : '<div class="empty"><div class="big">📝</div>Câu hỏi sẽ xuất hiện ở đây sau khi bạn bấm “Phân tích và tạo đề”.</div>'}</div>
+          <div style="margin-top:6px">${qPreviewHTML(q)}</div><div class="tiny muted">Nguồn: ${esc(q.source)}</div></div>`).join('') + (Gen.questions.length > (Gen.showN || 60) ? `<div class="row" style="justify-content:center;margin:12px 0"><button class="btn" data-act="more">Hiện thêm (đang xem ${Gen.showN || 60}/${Gen.questions.length})</button><button class="btn" data-act="all">Hiện tất cả</button></div>` : '') : '<div class="empty"><div class="big">📝</div>Câu hỏi sẽ xuất hiện ở đây sau khi bạn bấm “Phân tích và tạo đề”.</div>'}</div>
       </div>
     </div>
   </div>`;
@@ -1487,7 +1508,7 @@ Pages.generator = () => {
   const upd = () => { Gen.text = ta.value; Gen.saveDraft(); $('#charCount').textContent = `${ta.value.length.toLocaleString('vi-VN')} ký tự · ${Core.hanCount(ta.value)} chữ Hán`; };
   ta.addEventListener('input', upd); upd();
   const readCfg = () => {
-    c.hsk = +$('#cHsk').value; const cc = $('#cCount').value; c.count = cc === 'custom' ? clamp(+$('#cCountCustom').value || 10, 1, 300) : +cc;
+    c.hsk = +$('#cHsk').value; const cc = $('#cCount').value; c.count = cc === 'custom' ? clamp(+$('#cCountCustom').value || 10, 1, 3000) : +cc; if (cc === 'custom' && +$('#cCountCustom').value > 3000) toast('Tối đa 3.000 câu mỗi lần tạo.', 'warn');
     c.topic = $('#cTopic').value; c.difficulty = $('#cDiff').value; c.mode = $('#cMode').value; c.timePerQ = clamp(+$('#cTime').value || 20, 5, 300); c.retries = clamp(+$('#cRetry').value || 0, 0, 5);
     c.types = $$('#cTypes input:checked').map(x => x.value); c.showPinyin = $('#cPy').checked; c.showVi = $('#cVi').checked; c.readAloud = $('#cRead').checked; c.explain = $('#cExplain').checked;
     Gen.useAI = $('#useAI').checked;
@@ -1518,7 +1539,8 @@ Pages.generator = () => {
         try { const r = await AI.generate(Gen.text, c); Gen.questions = r.questions.slice(0, c.count); Gen.aiUsed = true; Gen.notes.push(`Đã tạo ${Gen.questions.length} câu bằng AI (${AI.providers[S.settings.ai.provider].label}). Tất cả đều cần giáo viên kiểm tra.${r.dropped ? ` Đã loại ${r.dropped} câu không hợp lệ.` : ''}`); }
         catch (e) { Gen.notes.push(`Gọi AI thất bại (${e.message}). Đã chuyển sang bộ phân tích JavaScript.`); }
       }
-      if (!Gen.aiUsed) { const r = Core.generate(Gen.parsed, c, bankVocab); Gen.questions = r.questions; Gen.notes.push(...r.notes); }
+      if (!Gen.aiUsed) { const r = Core.generate(Gen.parsed, c, bankVocab); Gen.questions = r.questions; Gen.coverage = r.coverage; Gen.notes.push(...r.notes); } else Gen.coverage = null;
+      Gen.showN = 60;
       Gen.busy = false; Pages.generator();
       setStatus(Gen.questions.length ? `<div class="notice ok">Đã tạo ${Gen.questions.length} câu hỏi ${Gen.aiUsed ? 'bằng AI' : 'bằng bộ phân tích JavaScript'}. Hãy xem lại ở cột bên phải trước khi lưu.</div>` : '<div class="notice warn">Chưa tạo được câu hỏi. Xem mục “Nội dung chưa đủ dữ liệu” trong kết quả phân tích.</div>');
     } catch (e) { Gen.busy = false; console.error(e); setStatus(`<div class="notice bad">Lỗi khi tạo câu hỏi: ${esc(e.message)}. Nội dung bạn nhập vẫn được giữ nguyên.</div>`); }
@@ -1537,6 +1559,8 @@ Pages.generator = () => {
     preview: () => previewQuestions(Gen.questions),
     export: () => exportQuestionsDialog(Gen.questions, 'cau_hoi_moi'),
     addQ: () => editQuestion(Core.makeQ({ type: 'meaning', hsk: c.hsk, topic: c.topic || 'Từ vựng', options: ['', ''], answer: 0 }), (q) => { Gen.questions.push(q); Pages.generator(); }),
+    more: () => { Gen.showN = (Gen.showN || 60) + 100; Pages.generator(); },
+    all: () => { Gen.showN = Gen.questions.length; Pages.generator(); },
     approveAll: () => { Gen.questions.forEach(q => { if (q.flag !== 'missing-answer') q.reviewed = true; }); Pages.generator(); },
     up: (el) => { const i = +el.dataset.i; if (i > 0) { [Gen.questions[i - 1], Gen.questions[i]] = [Gen.questions[i], Gen.questions[i - 1]]; Pages.generator(); } },
     down: (el) => { const i = +el.dataset.i; if (i < Gen.questions.length - 1) { [Gen.questions[i + 1], Gen.questions[i]] = [Gen.questions[i], Gen.questions[i + 1]]; Pages.generator(); } },
@@ -2228,6 +2252,7 @@ class Session {
       records: this.records, score: this.score, correct: qrecs.filter(r => r.ok).length, total: qrecs.length, durationMs: Math.round(performance.now() - this.startedAt),
     };
     if (this.cfg.lessonId) hist.lessonId = this.cfg.lessonId;
+    if (qrecs.length && this.cfg.usageKey) recordUsage(this.cfg.usageKey, this.items.slice(0, Math.min(this.items.length, this.idx + 1)));
     if (qrecs.length) { S.history.push(hist); Store.save('history'); if (this.cfg.onFinish) { try { this.cfg.onFinish(hist, this.items.slice(0, Math.min(this.items.length, this.idx + 1))); } catch (e) { console.warn(e); } } }
     const set = S.sets.find(s => s.id === this.cfg.setId); if (set) { set.lastUsed = Date.now(); Store.save('sets'); }
     if (this.game.destroy) this.game.destroy();
@@ -2394,7 +2419,7 @@ const Room = {
   replay() {
     if (!this.def) return;
     const l = this.cfg.lessonId && (S.lessons.find(x => x.id === this.cfg.lessonId) || this.cfg.lessonObj);
-    if (l) { this.cfg.sourceQuestions = lessonQuestions(l); this.cfg.avoid = new Set((l.recent || {})[this.def.id] || []); }
+    if (l) this.cfg.sourceQuestions = lessonQuestions(l);
     const items = prepareItems(this.def, this.cfg.sourceQuestions, this.cfg).items; this.open(this.def, this.cfg, items);
   },
   backToPicker() { if (this.cfg && this.cfg.lessonId && S.lessons.some(x => x.id === this.cfg.lessonId)) go('lessons', { id: this.cfg.lessonId }); else go('library'); },
@@ -2495,8 +2520,8 @@ function prepareItems(def, qs, cfg) {
   const allPool = vocabPool(S.questions).concat(S.vocab.map(v => ({ zh: v.hanzi, py: v.pinyin, vi: v.vi, hsk: v.hsk })));
   switch (kind) {
     case 'mcq': items = qs.map(q => Core.asMCQ(q, maxOpt)).filter(Boolean); if (def.needZh) items = items.filter(q => q.zh && !q.hide.includes('zh')).concat(items.filter(q => !(q.zh && !q.hide.includes('zh')))); break;
-    case 'tf': items = qs.map(q => Core.asTF(q)).filter(Boolean); break;
-    case 'order': { const ds = dictSet(); items = qs.map(q => Core.asOrder(q, ds)).filter(Boolean); break; }
+    case 'tf': items = qs.map(q => { const t = Core.asTF(q); return t ? { ...t, _w: wordOf({ ...q, kind: 'mcq' }) } : null; }).filter(Boolean); break;
+    case 'order': { const ds = dictSet(); items = qs.map(q => { const o = Core.asOrder(q, ds); return o ? { ...o, _w: q.type === 'order' ? '' : wordOf({ ...q, kind: 'mcq' }) } : null; }).filter(Boolean); break; }
     case 'match': {
       const mpool = cfg.shuffle ? shuffle(pool) : pool;
       const groups = qs.filter(q => q.type === 'match' && q.pairs.length >= 2).map(q => ({ ...q, kind: 'match', pairs: q.pairs.filter(p => p.zh && p.py).slice(0, 5) }));
@@ -2542,10 +2567,10 @@ function prepareItems(def, qs, cfg) {
     case 'pose': items = POSES.map(p => ({ ...p, kind: 'pose', type: 'pose', stem: 'Làm động tác đúng với từ', hide: [], correctText: p.zh, explanation: `${p.zh} (${p.pinyin}) = ${p.vi}. ${p.desc}`, speak: p.zh })); break;
     default: items = [];
   }
-  // Ưu tiên câu chưa gặp ở các lượt gần đây (bài học), sau đó mới tới câu đã gặp
-  if (cfg.avoid && cfg.avoid.size) { const fresh = items.filter(it => !cfg.avoid.has(itemKey(it))); const seen = items.filter(it => cfg.avoid.has(itemKey(it))); items = [...ord(fresh), ...ord(seen)]; }
-  else items = ord(items);
   const limit = cfg.count || items.length;
+  // Chống lặp dùng chung cho mọi trò: ưu tiên câu/từ chưa chơi, cân bằng dạng câu hỏi
+  if (cfg.usageKey && cfg.noRepeat !== false && kind !== 'pose') items = pickFresh(items, limit, S.usage[cfg.usageKey]);
+  else items = ord(items);
   if (kind === 'pose') { const base = items.slice(); while (items.length < Math.min(limit, 10)) items.push(...shuffle(base).map(x => ({ ...x }))); }
   items = items.slice(0, limit);
   // Dàn đều: tránh hai câu liên tiếp hỏi cùng một từ (khi có thể)
@@ -2558,6 +2583,52 @@ function prepareItems(def, qs, cfg) {
     return { ...it, options: order.map(i => it.options[i]), pics: it.pics ? order.map(i => it.pics[i]) : it.pics, answer: order.indexOf(it.answer) };
   });
   return { items, notes };
+}
+
+
+/* ---------- Bộ nhớ chống lặp dùng chung cho mọi trò chơi ---------- */
+/** Từ vựng chính mà một câu hỏi kiểm tra (dùng để tránh hỏi lại cùng một từ) */
+function wordOf(it) {
+  if (it._w) return it._w;
+  if (it.kind === 'match') return it.pairs.map(p => p.zh).join(',');
+  if (it.kind === 'pose') return it.zh;
+  const zh = String(it.zh || ''); const ans = it.options && it.answer >= 0 ? String(it.options[it.answer] || '') : '';
+  const m = zh.match(/「(.+?)」/); if (m) return m[1];
+  if (zh && Core.hanCount(zh) <= 6 && !/[。！？，_→]/.test(zh)) return zh;
+  if (ans && Core.hanCount(ans) >= 1 && Core.hanCount(ans) <= 6 && !/[。！？]/.test(ans)) return ans;
+  return zh || it.stem || '';
+}
+/**
+ * Chọn câu cho một lượt: câu chưa từng chơi trước, rồi tới câu chơi lâu nhất;
+ * trong lượt không lặp từ (khi còn từ khác) và chia đều các dạng câu hỏi,
+ * ưu tiên dạng ít được chơi trong các lượt trước.
+ */
+function pickFresh(items, limit, u) {
+  u = u || { q: {}, w: {}, t: {} };
+  const qT = (it) => u.q[itemKey(it)] || 0, wT = (it) => u.w[wordOf(it)] || 0;
+  const histTotal = Object.values(u.t || {}).reduce((a, b) => a + b, 0) || 1;
+  let pool = shuffle(items).sort((a, b) => (qT(a) - qT(b)) || (wT(a) - wT(b)));
+  const out = [], usedW = new Set(), tc = {};
+  while (out.length < limit && pool.length) {
+    let best = 0, bestS = Infinity; const win = Math.min(pool.length, 250);
+    const typeCap = Math.max(2, Math.ceil(limit / Math.max(1, uniq(items.map(x => x.type)).length)) + 1);
+    for (let i = 0; i < win; i++) {
+      const it = pool[i]; const c = tc[it.type] || 0;
+      // phạt: lặp từ trong lượt > câu đã chơi > dạng vượt mức chia đều > từ đã gặp ở lượt trước > dạng đã chơi nhiều trong quá khứ
+      const sc = (usedW.has(wordOf(it)) ? 1000 : 0) + (qT(it) ? 500 : 0) + (c >= typeCap ? 120 : c * 10) + (wT(it) ? 60 : 0) + ((u.t || {})[it.type] || 0) / histTotal * 8 + i * .02;
+      if (sc < bestS) { bestS = sc; best = i; }
+    }
+    const it = pool.splice(best, 1)[0]; out.push(it); usedW.add(wordOf(it)); tc[it.type] = (tc[it.type] || 0) + 1;
+  }
+  return out;
+}
+function recordUsage(key, items) {
+  const u = S.usage[key] || (S.usage[key] = { q: {}, w: {}, t: {}, plays: 0 }); const now = Date.now();
+  items.forEach(it => { u.q[itemKey(it)] = now; u.w[wordOf(it)] = now; u.t[it.type] = (u.t[it.type] || 0) + 1; });
+  u.plays = (u.plays || 0) + 1;
+  const trim = (o, max) => { const ks = Object.keys(o); if (ks.length > max) ks.sort((a, b) => o[a] - o[b]).slice(0, ks.length - max).forEach(k => delete o[k]); };
+  trim(u.q, 5000); trim(u.w, 3000);
+  Store.save('usage');
 }
 
 /* =====================================================================
@@ -2591,10 +2662,11 @@ function setupGame(def, opts = {}) {
       <label class="chk"><input type="checkbox" id="gRead" ${d.readAloud ? 'checked' : ''}>Đọc câu hỏi tiếng Trung</label>
       <label class="chk"><input type="checkbox" id="gExplain" ${d.explain ? 'checked' : ''}>Giải thích sau mỗi câu</label>
       <label class="chk"><input type="checkbox" id="gAuto" ${d.autoNext ? 'checked' : ''}>Tự chuyển câu</label>
+      <label class="chk" title="Ghi nhớ câu hỏi và từ vựng đã chơi ở MỌI trò của nguồn này (riêng theo từng lớp)"><input type="checkbox" id="gNoRep" checked>Tránh lặp câu và từ đã chơi (mọi trò)</label>
       <label class="chk"><input type="checkbox" id="gShuffle" ${lesson ? 'checked disabled' : ''}>Xáo trộn thứ tự câu${lesson ? ' (bài học luôn đổi đề)' : ''}</label>
       ${def.kind === 'picture' ? '<label class="chk"><input type="checkbox" id="gPicOnly">Chỉ hiển thị hình (học sinh tự suy luận)</label>' : ''}
     </div>
-    <div id="gCheck" style="margin-top:10px"></div>`,
+    <div id="gCheck" style="margin-top:10px"></div><div id="gUsage" class="small" style="margin-top:8px"></div>`,
     onOpen: (b) => {
       const fill = () => {
         const cid = $('#gClass', b).value; const st = S.students.filter(s => s.classId === cid);
@@ -2602,17 +2674,26 @@ function setupGame(def, opts = {}) {
         const mode = $('#gMode', b).value; $('#gWhoWrap', b).hidden = mode !== 'individual'; $('#gGroupsWrap', b).hidden = mode !== 'group';
         const set = S.sets.find(s => s.id === $('#gSet', b).value);
         if (set && set.config) { /* giữ cấu hình người dùng đang chỉnh */ }
-        const qs = sourceQs(b); const { items, notes } = prepareItems(def, qs, readSetupCfg(b, def, lesson));
+        const qs = sourceQs(b); const { items, notes } = prepareItems(def, qs, readSetupCfg(b, def, lesson, opts));
+        renderUsage(b);
         $('#gCheck', b).innerHTML = items.length ? `<div class="notice ok small">Sẵn sàng: ${items.length} câu phù hợp với trò này (${esc(def.kindLabel)}).${notes.length ? '<br>' + notes.map(esc).join('<br>') : ''}${qs.some(q => q.flag === 'missing-answer') ? '<br>Câu thiếu đáp án sẽ không được dùng.' : ''}</div>`
           : `<div class="notice bad small">Bộ đề này không có câu phù hợp cho trò “${esc(def.name)}” (cần: ${esc(def.kindLabel)}). Hãy chọn bộ đề khác hoặc dùng “Toàn bộ ngân hàng câu hỏi”.</div>`;
       };
-      ['#gClass', '#gMode', '#gSet', '#gHsk', '#gCount'].forEach(id => $(id, b).addEventListener('change', fill));
+      ['#gClass', '#gMode', '#gSet', '#gHsk', '#gCount', '#gNoRep'].forEach(id => $(id, b).addEventListener('change', fill));
+      function renderUsage(bb) {
+        const cfg0 = readSetupCfg(bb, def, lesson, opts); const u = S.usage[cfg0.usageKey];
+        const all = prepareItems(def, sourceQs(bb), { ...cfg0, count: 99999, noRepeat: false }).items;
+        if (!all.length || def.kind === 'pose') { $('#gUsage', bb).innerHTML = ''; return; }
+        const words = uniq(all.map(wordOf)); const seenQ = u ? all.filter(it => u.q[itemKey(it)]).length : 0; const seenW = u ? words.filter(w => u.w[w]).length : 0;
+        $('#gUsage', bb).innerHTML = `<div class="notice small">🔁 Bộ nhớ chống lặp ${cfg0.classId ? 'của lớp này' : '(không chọn lớp)'}: đã chơi <b>${seenQ}/${all.length}</b> câu và <b>${seenW}/${words.length}</b> từ của nguồn này qua ${u ? u.plays : 0} lượt (mọi trò). ${seenQ >= all.length ? 'Đã chơi hết — các lượt tới sẽ ưu tiên câu chơi lâu nhất.' : ''} ${u ? '<button class="btn sm" id="gUsageReset" style="margin-left:6px">Đặt lại</button>' : ''}</div>`;
+        const rb = $('#gUsageReset', bb); if (rb) rb.onclick = async () => { if (await Modal.confirm('Xóa bộ nhớ chống lặp của nguồn câu hỏi này' + (cfg0.classId ? ' (lớp đang chọn)' : '') + '?', 'Đặt lại')) { delete S.usage[cfg0.usageKey]; Store.save('usage'); renderUsage(bb); } };
+      }
       if ($('#gPicOnly', b)) $('#gPicOnly', b).addEventListener('change', fill);
       fill();
     },
     buttons: [{ label: 'Hủy' }, {
       label: '▶ Vào phòng chơi', cls: 'primary', act: (b) => {
-        const cfg = readSetupCfg(b, def, lesson); const qs = sourceQs(b);
+        const cfg = readSetupCfg(b, def, lesson, opts); const qs = sourceQs(b);
         const { items } = prepareItems(def, qs, cfg);
         if (!items.length) { toast('Không có câu phù hợp cho trò này. Hãy chọn bộ đề khác.', 'bad'); return false; }
         cfg.sourceQuestions = qs;
@@ -2630,7 +2711,7 @@ function setupGame(def, opts = {}) {
     const set = S.sets.find(s => s.id === v); return set ? setQuestions(set) : [];
   }
 }
-function readSetupCfg(b, def, lesson) {
+function readSetupCfg(b, def, lesson, opts = {}) {
   const v = $('#gSet', b).value; const set = S.sets.find(s => s.id === v);
   const cls = S.classes.find(c => c.id === $('#gClass', b).value);
   const mode = $('#gMode', b).value; let players;
@@ -2643,7 +2724,9 @@ function readSetupCfg(b, def, lesson) {
     showPinyin: $('#gPy', b).checked, showVi: $('#gVi', b).checked, readAloud: $('#gRead', b).checked, explain: $('#gExplain', b).checked, autoNext: $('#gAuto', b).checked, shuffle: $('#gShuffle', b).checked,
     pictureOnly: $('#gPicOnly', b) ? $('#gPicOnly', b).checked : false,
     students: cls ? S.students.filter(s => s.classId === cls.id) : [],
-    ...(lesson ? { setId: '', hsk: lesson.hsk, shuffle: true, reshuffle: true, lessonId: lesson.id, lessonObj: lesson, setName: (lesson.fromMaterial ? 'Tài liệu: ' : 'Bài học: ') + lesson.name, avoid: new Set((lesson.recent || {})[def.id] || []) } : {}),
+    ...(lesson ? { setId: '', hsk: lesson.hsk, shuffle: true, reshuffle: true, lessonId: lesson.id, lessonObj: lesson, setName: (lesson.fromMaterial ? 'Tài liệu: ' : 'Bài học: ') + lesson.name } : {}),
+    noRepeat: $('#gNoRep', b) ? $('#gNoRep', b).checked : true,
+    usageKey: (lesson ? (lesson.fromMaterial ? 'mat:' : 'lesson:') + lesson.id : opts.bank ? 'bank:' + opts.bank.label : set ? 'set:' + set.id : 'bankall:' + ($('#gHsk', b).value || 'all')) + (cls ? '|cls:' + cls.id : ''),
   };
 }
 /* =====================================================================
@@ -3500,14 +3583,14 @@ const LessonUI = { cur: '' };
 const LESSON_TYPES_DEFAULT = ['meaning', 'hanzi', 'pinyin', 'py2zh', 'listen', 'guess', 'fill', 'order', 'tf', 'match', 'zh2vi', 'vi2zh', 'dialog', 'situation', 'grammar'];
 function hashStr(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0; return h.toString(36); }
 /** Khóa ổn định của một câu trong trò chơi — dùng để tránh lặp lại giữa các lượt */
-function itemKey(it) { if (it.kind === 'match') return 'm:' + it.pairs.map(p => p.zh).sort().join(','); return (it.id || it.zh || '') + (it.kind === 'tf' ? ':tf' : ''); }
+function itemKey(it) { if (it.kind === 'match') return 'm:' + it.pairs.map(p => p.zh).sort().join(','); return it.id || it.zh || ''; }
 function sampleLesson() {
   return { id: 'lesson_sample', name: 'Bài mẫu – Tiếng Trung công xưởng', hsk: 3, text: SAMPLE_TEXT, types: LESSON_TYPES_DEFAULT.slice(), difficulty: 'medium', includeInferred: false, count: 10, timePerQ: 20, games: ['hand-quiz', 'bubble-pop', 'pinch-match', 'air-drum', 'fruit-ninja', 'air-calligraphy', 'head-tilt', 'secret-box', 'smile-wheel'], sample: true, createdAt: Date.now(), plays: 0, playsByGame: {}, recent: {}, lastPlayed: 0 };
 }
 /** Sinh toàn bộ câu hỏi có thể từ nội dung bài (mỗi lần gọi cho kết quả khác nhau) */
 function lessonQuestions(l) {
   const parsed = Core.parse(l.text || '');
-  const r = Core.generate(parsed, { hsk: l.hsk, count: 400, types: l.types && l.types.length ? l.types : LESSON_TYPES_DEFAULT, difficulty: l.difficulty || 'medium' }, S.vocab);
+  const r = Core.generate(parsed, { hsk: l.hsk, count: 3000, types: l.types && l.types.length ? l.types : LESSON_TYPES_DEFAULT, difficulty: l.difficulty || 'medium' }, S.vocab);
   return r.questions
     .filter(q => l.includeInferred || q.flag !== 'inferred')
     .map(q => ({ ...q, id: 'L' + String(l.id).slice(-6) + '_' + hashStr(q.type + '|' + q.stem + '|' + q.zh + '|' + (q.options[q.answer] || q.tokens.join(''))), source: 'Bài học: ' + l.name }));
@@ -3557,7 +3640,7 @@ function lessonDetail(l) {
         <div class="small muted">HSK ${l.hsk} · ${st.vocab} từ vựng · ${st.sentences} câu · ${st.dialogs} hội thoại · ${l.count || 10} câu mỗi lượt · ${l.timePerQ || 20} giây/câu${l.plays ? ` · đã chơi ${l.plays} lượt` : ''}</div></div>
       <div class="row"><button class="btn sm" data-act="edit">✎ Sửa bài học</button><button class="btn sm" data-act="pv">👁 Xem thử một lượt câu hỏi</button><button class="btn sm" data-act="fix">📋 Tạo bộ đề cố định để duyệt</button><button class="btn sm" data-act="reset">↺ Quên lịch sử lặp lại</button></div>
     </div></div>
-    <div class="notice small" style="margin-bottom:14px">Mỗi lần bấm chơi, câu hỏi được sinh lại từ nội dung bài: cùng một từ có thể được hỏi theo nghĩa, chữ Hán, pinyin, nghe, đúng/sai…; phương án sai và vị trí đáp án thay đổi; câu đã gặp ở các lượt gần đây của trò đó được xếp sau.</div>
+    <div class="notice small" style="margin-bottom:14px">Mỗi lần bấm chơi, câu hỏi được sinh lại từ nội dung bài: cùng một từ có thể được hỏi theo nghĩa, chữ Hán, pinyin, nghe, đúng/sai…; phương án sai và vị trí đáp án thay đổi. Bộ nhớ chống lặp dùng chung cho mọi trò: câu và từ đã chơi ở bất kỳ trò nào của bài (theo từng lớp) được xếp sau.</div>
     ${games.length ? `<div class="games">${games.map(g => `<button class="gcard" data-game="${g.id}"><div class="row between"><div class="gi" style="background:${g.color}">${g.icon}</div><span class="pill">${(l.playsByGame || {})[g.id] || 0} lượt</span></div><h4>${esc(g.name)}</h4><p>${esc(g.desc)}</p><div class="row"><span class="pill t">${CAM_LABEL(g.models)}</span><span class="pill v">${esc(g.kindLabel)}</span></div></button>`).join('')}</div>`
     : '<div class="card empty">Bài học chưa chọn trò chơi nào. Bấm “Sửa bài học” để chọn.</div>'}`;
   bindActs($('#view'), {
@@ -3571,7 +3654,7 @@ function lessonDetail(l) {
       S.questions.push(...qs); S.sets.push({ id: uid('set'), name: l.name + ' (bộ cố định)', hsk: l.hsk, topic: '', questionIds: qs.map(q => q.id), config: { ...S.settings.defaults }, createdAt: Date.now(), lastUsed: 0 });
       Store.save('questions'); Store.save('sets'); toast('Đã tạo bộ đề cố định. Xem ở Ngân hàng câu hỏi → Bộ đề.', 'ok', 5000);
     },
-    reset: async () => { if (await Modal.confirm('Xóa ghi nhớ các câu đã chơi của bài này? Các lượt sau sẽ chọn câu ngẫu nhiên lại từ đầu.', 'Đồng ý')) { l.recent = {}; Store.save('lessons'); toast('Đã đặt lại.', 'ok'); } },
+    reset: async () => { if (await Modal.confirm('Xóa bộ nhớ chống lặp của bài này (mọi trò, mọi lớp)? Các lượt sau sẽ chọn câu lại từ đầu.', 'Đồng ý')) { l.recent = {}; Object.keys(S.usage).filter(k => k === 'lesson:' + l.id || k.startsWith('lesson:' + l.id + '|')).forEach(k => delete S.usage[k]); Store.save('lessons'); Store.save('usage'); toast('Đã đặt lại.', 'ok'); } },
   });
   $('.games', $('#view')) && ($('.games', $('#view')).onclick = (e) => { const c = e.target.closest('[data-game]'); if (c) setupGame(GAMES.find(g => g.id === c.dataset.game), { lesson: l }); });
 }
@@ -3906,14 +3989,15 @@ Pages.settings = () => {
         if (!(await Modal.confirm(`Phục hồi sẽ THAY THẾ dữ liệu hiện tại bằng bản sao lưu ngày ${esc(j.exportedAt || '?')} (${(d.questions || []).length} câu hỏi, ${(d.sets || []).length} bộ đề, ${(d.history || []).length} lượt chơi). Tiếp tục?`, 'Phục hồi', true))) return;
         const keepKey = S.settings.ai.key;
         arrays.forEach(k => { S[k] = Array.isArray(d[k]) ? d[k].map(x => k === 'questions' ? Core.makeQ(x) : x) : []; });
+        S.usage = d.usage && typeof d.usage === 'object' && !Array.isArray(d.usage) ? d.usage : {};
         S.settings = mergeDeep(DEFAULT_SETTINGS, d.settings || {}); S.settings.ai.key = keepKey;
         for (const k of KEYS) await Store.saveNow(k);
         toast('Đã phục hồi dữ liệu.', 'ok'); Pages.settings(); renderNav();
       } catch (e) { toast('Không phục hồi được: ' + e.message + ' Dữ liệu hiện tại không bị thay đổi.', 'bad', 7000); }
     },
     reseed: async () => { if (!(await Modal.confirm('Nạp lại câu hỏi, từ vựng và bộ đề HSK mẫu? Dữ liệu của bạn được giữ nguyên; các mục mẫu cũ sẽ được thay mới.', 'Nạp lại'))) return; const mine = { q: S.questions.filter(q => !/^Mẫu HSK/.test(q.source)), v: S.vocab.filter(v => v.source !== 'Mẫu HSK'), s: S.sets.filter(s => !s.sample) }; seedData(); S.questions = [...S.questions, ...mine.q]; S.vocab = [...S.vocab, ...mine.v]; S.sets = [...S.sets, ...mine.s]; await Store.saveNow('questions'); await Store.saveNow('vocab'); await Store.saveNow('sets'); await Store.saveNow('lessons'); toast('Đã nạp lại dữ liệu mẫu.', 'ok'); Pages.settings(); },
-    clearHist: async () => { if (await Modal.confirm('Xóa toàn bộ lịch sử kết quả và bảng xếp hạng? Không thể hoàn tác (hãy sao lưu trước).', 'Xóa lịch sử', true)) { S.history = []; await Store.saveNow('history'); toast('Đã xóa lịch sử.', 'ok'); Pages.settings(); } },
-    wipe: async () => { if (await Modal.confirm('Xóa TOÀN BỘ dữ liệu (câu hỏi, bộ đề, lớp, học sinh, lịch sử, cài đặt) và nạp lại dữ liệu mẫu? Không thể hoàn tác.', 'Xóa toàn bộ', true)) { KEYS.forEach(k => { S[k] = k === 'settings' ? structuredClone(DEFAULT_SETTINGS) : []; }); seedData(); for (const k of KEYS) await Store.saveNow(k); try { localStorage.removeItem('ctags_draft'); } catch (e) { /* bỏ qua */ } Gen.text = ''; Gen.questions = []; toast('Đã xóa và nạp lại dữ liệu mẫu.', 'ok'); go('dashboard'); } },
+    clearHist: async () => { if (await Modal.confirm('Xóa toàn bộ lịch sử kết quả và bảng xếp hạng? Không thể hoàn tác (hãy sao lưu trước).', 'Xóa lịch sử', true)) { S.history = []; S.usage = {}; await Store.saveNow('history'); await Store.saveNow('usage'); toast('Đã xóa lịch sử.', 'ok'); Pages.settings(); } },
+    wipe: async () => { if (await Modal.confirm('Xóa TOÀN BỘ dữ liệu (câu hỏi, bộ đề, lớp, học sinh, lịch sử, cài đặt) và nạp lại dữ liệu mẫu? Không thể hoàn tác.', 'Xóa toàn bộ', true)) { KEYS.forEach(k => { S[k] = k === 'settings' ? structuredClone(DEFAULT_SETTINGS) : k === 'usage' ? {} : []; }); seedData(); for (const k of KEYS) await Store.saveNow(k); try { localStorage.removeItem('ctags_draft'); } catch (e) { /* bỏ qua */ } Gen.text = ''; Gen.questions = []; toast('Đã xóa và nạp lại dữ liệu mẫu.', 'ok'); go('dashboard'); } },
   });
 };
 
@@ -3930,6 +4014,7 @@ async function boot() {
   } catch (e) { toast('Không đọc được dữ liệu đã lưu: ' + e.message, 'bad', 7000); }
   if (!S.questions.length && !S.sets.length) { seedData(); for (const k of ['questions', 'vocab', 'sets', 'lessons']) await Store.saveNow(k); }
   if (!Array.isArray(S.lessons)) S.lessons = [];
+  if (!S.usage || typeof S.usage !== 'object' || Array.isArray(S.usage)) S.usage = {};
   if (needLessonSeed && !S.lessons.length) { S.lessons.push(sampleLesson()); await Store.saveNow('lessons'); }
   $('#muteBtn').textContent = S.settings.muted ? '🔇' : '🔊';
   $('#muteBtn').onclick = () => { S.settings.muted = !S.settings.muted; $('#muteBtn').textContent = S.settings.muted ? '🔇' : '🔊'; Store.save('settings'); if (!S.settings.muted) { SFX.ensure(); SFX.play('select'); } };
