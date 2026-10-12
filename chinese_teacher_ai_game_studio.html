@@ -642,6 +642,7 @@ const Core = (() => {
     return { hanzi: han, pinyin, vi: toks.slice(k).join(' ') };
   }
 
+  const Core_hanOK = (t) => hanCount(t) >= 2;
   function parse(text) {
     const res = { vocab: [], sentences: [], dialogues: [], mcqs: [], tfs: [], unparsed: [], duplicates: [], warnings: [], lineCount: 0 };
     const raw = String(text || '').replace(/\r\n?/g, '\n').split('\n');
@@ -765,13 +766,22 @@ const Core = (() => {
         else { const c = l.match(/^([\u3400-\u9fff·]{1,8})\s*[:：]\s*([^\u3400-\u9fff]+)$/); if (c) fields = [c[1], c[2]]; }
       }
       if (fields && fields.filter(f => f.trim()).length >= 2) {
-        const v = fieldsToVocab(fields.map(f => f.trim()));
-        if (v) { addVocab(v, i); continue; }
+        const ff = fields.map(f => f.trim());
+        const v = fieldsToVocab(ff);
+        if (v) {
+          addVocab(v, i);
+          // cột "Ví dụ": câu tiếng Trung khác chữ chính → thành câu luyện tập (kèm bản dịch nếu cột kế tiếp là tiếng Việt)
+          ff.forEach((f, k) => { if (HAN.test(f) && f !== v.hanzi && hanCount(f) >= 3) { const nx = ff[k + 1]; addSentence({ zh: f, vi: nx && !HAN.test(nx) && classifyField(nx) === 'vi' && nx !== v.vi ? nx : '', pinyin: '' }, i); } });
+          continue;
+        }
         // không phải từ vựng: có thể là câu song ngữ "中文句子 | nghĩa"
         const hanF = fields.find(f => HAN.test(f)); const viF = fields.find(f => !HAN.test(f) && classifyField(f) !== 'py' && f.trim());
         const pyF = fields.find(f => classifyField(f) === 'py');
         if (hanF) { addSentence({ zh: hanF.trim(), vi: viF ? viF.trim() : '', pinyin: pyF ? pyF.trim() : '' }, i); continue; }
       }
+      // ---- Cách nhau bằng dấu cách, có câu ví dụ ở cuối: "爸爸 bàba bố 我的爸爸很高" ----
+      const ndx = l.match(/^([\u3400-\u9fff]{1,8})\s+([^\u3400-\u9fff]*[A-Za-zÀ-ỹ][^\u3400-\u9fff]*?)\s+([\u3400-\u9fff].*)$/);
+      if (ndx && Core_hanOK(ndx[3])) { const v = splitNoDelim(ndx[1], ndx[2]); addVocab(v, i); if (ndx[3].trim() !== ndx[1]) addSentence({ zh: ndx[3].trim(), vi: '', pinyin: '' }, i); continue; }
       // ---- Không phân cách: "你好 nǐ hǎo xin chào" ----
       const nd = l.match(/^([\u3400-\u9fff]{1,8})\s+([^\u3400-\u9fff]+)$/);
       if (nd) { addVocab(splitNoDelim(nd[1], nd[2]), i); continue; }
@@ -2383,7 +2393,7 @@ const Room = {
   },
   replay() {
     if (!this.def) return;
-    const l = this.cfg.lessonId && S.lessons.find(x => x.id === this.cfg.lessonId);
+    const l = this.cfg.lessonId && (S.lessons.find(x => x.id === this.cfg.lessonId) || this.cfg.lessonObj);
     if (l) { this.cfg.sourceQuestions = lessonQuestions(l); this.cfg.avoid = new Set((l.recent || {})[this.def.id] || []); }
     const items = prepareItems(this.def, this.cfg.sourceQuestions, this.cfg).items; this.open(this.def, this.cfg, items);
   },
@@ -2537,7 +2547,10 @@ function prepareItems(def, qs, cfg) {
   else items = ord(items);
   const limit = cfg.count || items.length;
   if (kind === 'pose') { const base = items.slice(); while (items.length < Math.min(limit, 10)) items.push(...shuffle(base).map(x => ({ ...x }))); }
-  items = items.slice(0, limit).map((it, i) => ({ ...it, _n: i }));
+  items = items.slice(0, limit);
+  // Dàn đều: tránh hai câu liên tiếp hỏi cùng một từ (khi có thể)
+  if (cfg.shuffle && items.length > 2) { const rest = items.slice(); const out = []; while (rest.length) { const prev = out[out.length - 1]; let k = prev ? rest.findIndex(x => (x.zh || x.stem) !== (prev.zh || prev.stem) && !(prev.zh && x.zh && (x.zh.includes(prev.zh) || prev.zh.includes(x.zh)))) : 0; if (k < 0) k = 0; out.push(rest.splice(k, 1)[0]); } items = out; }
+  items = items.map((it, i) => ({ ...it, _n: i }));
   // Đổi vị trí đáp án mỗi lượt (không áp dụng cho Đúng/Sai và thanh điệu vì thứ tự cố định)
   if (cfg.reshuffle) items = items.map(it => {
     if (it.kind !== 'mcq' || !it.options || it.options.length < 2 || ['tf', 'tone'].includes(it.type)) return it;
@@ -2552,27 +2565,18 @@ function prepareItems(def, qs, cfg) {
    ===================================================================== */
 const GAMES = []; // được điền ở phần định nghĩa 20 trò chơi
 const CAM_LABEL = (m) => m.length ? m.map(x => ({ hand: '✋ Tay', face: '🙂 Mặt', pose: '🧍 Cơ thể' }[x])).join(' + ') : 'Không cần camera';
-const libState = { setId: '' };
-Pages.library = (arg) => {
-  if (arg && arg.setId) libState.setId = arg.setId;
-  $('#view').innerHTML = `
-    <div class="card" style="margin-bottom:16px"><div class="row between"><div><h3 style="margin:0">Chọn trò chơi</h3><p class="small muted" style="margin:4px 0 0">Mỗi trò có điều khiển bằng camera và phương án dự phòng bằng chuột, bàn phím hoặc chạm.${libState.setId && S.sets.find(s => s.id === libState.setId) ? ` Bộ đề đang chọn: <b>${esc(S.sets.find(s => s.id === libState.setId).name)}</b>.` : ''}</p></div>
-    <div class="row"><select id="libFilter" style="width:auto"><option value="">Tất cả trò</option><option value="hand">Dùng tay</option><option value="face">Dùng khuôn mặt</option><option value="pose">Dùng cơ thể</option></select></div></div></div>
-    <div class="games" id="gameGrid">${GAMES.map(g => `<button class="gcard" data-game="${g.id}" data-models="${g.models.join(',')}"><div class="row between"><div class="gi" style="background:${g.color}">${g.icon}</div><span class="pill">${g.num}/20</span></div><h4>${esc(g.name)}</h4><p>${esc(g.desc)}</p><div class="row"><span class="pill t">${CAM_LABEL(g.models)}</span><span class="pill">${esc(g.levels)}</span><span class="pill v">${esc(g.kindLabel)}</span></div></button>`).join('')}</div>`;
-  $('#libFilter').onchange = (e) => $$('.gcard').forEach(c => { c.style.display = !e.target.value || c.dataset.models.includes(e.target.value) ? '' : 'none'; });
-  $('#gameGrid').onclick = (e) => { const c = e.target.closest('[data-game]'); if (c) setupGame(GAMES.find(g => g.id === c.dataset.game)); };
-};
+const libState = { setId: '', src: 'set', q: '', hsk: '', topic: '', pick: '', cam: '' };
 function setupGame(def, opts = {}) {
   const lesson = opts.lesson || null; const lessonQs = lesson ? lessonQuestions(lesson) : null;
   const sets = S.sets.slice().sort((a, b) => (b.lastUsed || b.createdAt) - (a.lastUsed || a.createdAt));
   const d = S.settings.defaults;
-  const setSel = libState.setId || (sets[0] && sets[0].id) || '';
+  const setSel = opts.setId || libState.setId || (sets[0] && sets[0].id) || '';
   Modal.open({
     title: `${def.icon} ${def.name}`, wide: true, body: `
     <p class="small muted" style="margin-top:0">${esc(def.desc)}</p>
     <div class="grid g3">
-      <div class="field" style="grid-column:span 2"><label class="f">${lesson ? 'Nguồn câu hỏi' : 'Bộ đề'}</label>${lesson ? `<select id="gSet" disabled><option value="__lesson">📘 ${esc(lesson.name)} — sinh đề mới mỗi lượt</option></select>` : `<select id="gSet">${sets.map(s => `<option value="${s.id}" ${s.id === setSel ? 'selected' : ''}>${esc(s.name)} (${s.questionIds.length} câu)</option>`).join('')}<option value="__bank">Toàn bộ ngân hàng câu hỏi (lọc theo HSK)</option></select>`}</div>
-      <div class="field"><label class="f">HSK (khi dùng toàn bộ ngân hàng)</label><select id="gHsk" ${lesson ? 'disabled' : ''}>${hskOptions(lesson ? lesson.hsk : '', true)}</select></div>
+      <div class="field" style="grid-column:span 2"><label class="f">${lesson ? 'Nguồn câu hỏi' : 'Bộ đề'}</label>${lesson ? `<select id="gSet" disabled><option value="__lesson">${lesson.fromMaterial ? '📚' : '📘'} ${esc(lesson.name)} — sinh đề mới mỗi lượt</option></select>` : opts.bank ? `<select id="gSet" disabled><option value="__bankf">🗂 Ngân hàng: ${esc(opts.bank.label)} (${opts.bank.qs.length} câu)</option></select>` : `<select id="gSet">${sets.map(s => `<option value="${s.id}" ${s.id === setSel ? 'selected' : ''}>${esc(s.name)} (${s.questionIds.length} câu)</option>`).join('')}<option value="__bank">Toàn bộ ngân hàng câu hỏi (lọc theo HSK)</option></select>`}</div>
+      <div class="field"><label class="f">HSK (khi dùng toàn bộ ngân hàng)</label><select id="gHsk" ${lesson || opts.bank ? 'disabled' : ''}>${hskOptions(lesson ? lesson.hsk : '', true)}</select></div>
       <div class="field"><label class="f">Lớp học</label><select id="gClass"><option value="">Không chọn lớp</option>${S.classes.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div>
       <div class="field"><label class="f">Chế độ</label><select id="gMode"><option value="individual">Cá nhân</option><option value="group">Chia nhóm thi đua</option><option value="class">Cả lớp cùng quan sát</option></select></div>
       <div class="field" id="gWhoWrap"><label class="f">Người chơi</label><select id="gStudent"><option value="">Khách / không ghi tên</option></select></div>
@@ -2612,6 +2616,7 @@ function setupGame(def, opts = {}) {
         const { items } = prepareItems(def, qs, cfg);
         if (!items.length) { toast('Không có câu phù hợp cho trò này. Hãy chọn bộ đề khác.', 'bad'); return false; }
         cfg.sourceQuestions = qs;
+        if (opts.bank) { cfg.setName = 'Ngân hàng: ' + opts.bank.label; cfg.hsk = opts.bank.hsk || 6; }
         if (lesson) cfg.onFinish = (hist, played) => lessonAfterPlay(lesson, def, played);
         go('room'); Room.open(def, cfg, items);
       },
@@ -2619,6 +2624,7 @@ function setupGame(def, opts = {}) {
   });
   function sourceQs(b) {
     if (lessonQs) return lessonQs;
+    if (opts.bank) return opts.bank.qs;
     const v = $('#gSet', b).value;
     if (v === '__bank') { const h = +$('#gHsk', b).value; return S.questions.filter(q => !h || q.hsk === h); }
     const set = S.sets.find(s => s.id === v); return set ? setQuestions(set) : [];
@@ -2637,7 +2643,7 @@ function readSetupCfg(b, def, lesson) {
     showPinyin: $('#gPy', b).checked, showVi: $('#gVi', b).checked, readAloud: $('#gRead', b).checked, explain: $('#gExplain', b).checked, autoNext: $('#gAuto', b).checked, shuffle: $('#gShuffle', b).checked,
     pictureOnly: $('#gPicOnly', b) ? $('#gPicOnly', b).checked : false,
     students: cls ? S.students.filter(s => s.classId === cls.id) : [],
-    ...(lesson ? { setId: '', setName: 'Bài học: ' + lesson.name, hsk: lesson.hsk, shuffle: true, reshuffle: true, lessonId: lesson.id, avoid: new Set((lesson.recent || {})[def.id] || []) } : {}),
+    ...(lesson ? { setId: '', hsk: lesson.hsk, shuffle: true, reshuffle: true, lessonId: lesson.id, lessonObj: lesson, setName: (lesson.fromMaterial ? 'Tài liệu: ' : 'Bài học: ') + lesson.name, avoid: new Set((lesson.recent || {})[def.id] || []) } : {}),
   };
 }
 /* =====================================================================
@@ -3606,6 +3612,87 @@ function lessonForm(l, init = {}) {
     }],
   });
 }
+
+/* =====================================================================
+   THƯ VIỆN TRÒ CHƠI — chọn nguồn câu hỏi (bộ đề / bài học / tài liệu /
+   ngân hàng lọc theo HSK, chủ đề), chỉ hiện trò chơi được với nguồn đó
+   ===================================================================== */
+const matHskCache = new Map();
+function materialHsk(m) {
+  if (m.analysis && m.analysis.hsk) return m.analysis.hsk;
+  if (matHskCache.has(m.id)) return matHskCache.get(m.id);
+  let h = 1; try { const dict = {}; S.vocab.forEach(v => { if (!dict[v.hanzi]) dict[v.hanzi] = v.hsk; }); h = Core.analyze(Core.parse(m.text), m.text, dict).hsk; } catch (e) { /* giữ HSK 1 */ }
+  matHskCache.set(m.id, h); return h;
+}
+/** Tài liệu trong kho được dùng như một bài học tạm thời (sinh đề mới mỗi lượt) */
+function matLesson(m) { return { id: 'mat_' + m.id, name: m.title, hsk: materialHsk(m), text: m.text, types: LESSON_TYPES_DEFAULT.slice(), difficulty: 'medium', includeInferred: false, count: S.settings.defaults.count, timePerQ: S.settings.defaults.timePerQ, games: [], recent: {}, playsByGame: {}, fromMaterial: true }; }
+const norm = (t) => Core.stripTones(String(t || '').toLowerCase());
+function libSources() {
+  const q = norm(libState.q), h = +libState.hsk || 0, tp = libState.topic;
+  if (libState.src === 'set') return S.sets.filter(st => (!h || st.hsk === h) && (!q || norm(st.name).includes(q)) && (!tp || st.topic === tp || setQuestions(st).some(x => x.topic === tp)))
+    .sort((a, b) => (b.lastUsed || b.createdAt) - (a.lastUsed || a.createdAt)).map(st => ({ id: st.id, name: st.name, hsk: st.hsk, info: `${setQuestions(st).length} câu${st.topic ? ' · ' + st.topic : ''}` }));
+  if (libState.src === 'lesson') return S.lessons.filter(l => (!h || l.hsk === h) && (!q || norm(l.name + ' ' + l.text).includes(q)))
+    .map(l => { const s2 = lessonStats(l); return { id: l.id, name: l.name, hsk: l.hsk, info: `${s2.vocab} từ · ${s2.sentences} câu` }; });
+  if (libState.src === 'material') return S.materials.filter(m => (!h || materialHsk(m) === h) && (!q || norm(m.title + ' ' + m.text).includes(q)))
+    .map(m => ({ id: m.id, name: m.title, hsk: materialHsk(m), info: `${Core.hanCount(m.text)} chữ Hán` }));
+  return [];
+}
+function bankFilteredForLib() {
+  const q = norm(libState.q), h = +libState.hsk || 0, tp = libState.topic;
+  return S.questions.filter(x => (!h || x.hsk === h) && (!tp || x.topic === tp) && (!q || norm([x.stem, x.zh, x.pinyin, x.vi, ...x.options, ...x.tags].join(' ')).includes(q)));
+}
+/** Nguồn đang chọn → {label, qs, open(def)} */
+function libCurrent(list) {
+  if (libState.src === 'bank') {
+    const qs = bankFilteredForLib(); const label = [libState.hsk ? 'HSK ' + libState.hsk : 'mọi cấp', libState.topic || 'mọi chủ đề', libState.q ? `“${libState.q}”` : ''].filter(Boolean).join(' · ');
+    return { label, qs, hsk: +libState.hsk || 6, open: (def) => setupGame(def, { bank: { qs, label, hsk: +libState.hsk || 6 } }) };
+  }
+  const it = list.find(x => x.id === libState.pick) || list[0]; if (!it) return null; libState.pick = it.id;
+  if (libState.src === 'set') { const st = S.sets.find(x => x.id === it.id); libState.setId = st.id; return { label: st.name, qs: setQuestions(st), hsk: st.hsk, open: (def) => setupGame(def, { setId: st.id }) }; }
+  if (libState.src === 'lesson') { const l = S.lessons.find(x => x.id === it.id); return { label: l.name, qs: lessonQuestions(l), hsk: l.hsk, lesson: l, open: (def) => setupGame(def, { lesson: l }) }; }
+  const m = S.materials.find(x => x.id === it.id); const ml = matLesson(m);
+  return { label: m.title, qs: lessonQuestions(ml), hsk: ml.hsk, open: (def) => setupGame(def, { lesson: ml }) };
+}
+Pages.library = (arg) => {
+  if (arg && arg.setId) { libState.src = 'set'; libState.pick = arg.setId; libState.setId = arg.setId; libState.q = ''; libState.hsk = ''; libState.topic = ''; }
+  if (arg && arg.lessonId) { libState.src = 'lesson'; libState.pick = arg.lessonId; libState.q = ''; libState.hsk = ''; }
+  const list = libSources(); const cur = libCurrent(list);
+  const SRC = [['set', '🗂️ Bộ đề', S.sets.length], ['lesson', '📘 Bài học', S.lessons.length], ['material', '📚 Kho tài liệu', S.materials.length], ['bank', '🔎 Ngân hàng câu hỏi', S.questions.length]];
+  let comp = [];
+  if (cur) comp = GAMES.map(g => { const r = prepareItems(g, cur.qs, { count: 999, hsk: cur.hsk, shuffle: false }); return { g, n: r.items.length, note: r.notes.join(' ') }; })
+    .filter(c => !libState.cam || c.g.models.includes(libState.cam) || (libState.cam === 'none' && !c.g.models.length));
+  const inLesson = (id) => cur && cur.lesson && (cur.lesson.games || []).includes(id);
+  const ok = comp.filter(c => c.n > 0).sort((a, b) => (inLesson(b.g.id) - inLesson(a.g.id)) || (a.g.num - b.g.num)); const no = comp.filter(c => !c.n);
+  $('#view').innerHTML = `
+  <div class="card" style="margin-bottom:16px">
+    <h3 style="margin:0 0 10px">1. Chọn nguồn câu hỏi</h3>
+    <div class="tabs" style="margin-bottom:12px">${SRC.map(([k, l, n]) => `<button class="${libState.src === k ? 'active' : ''}" data-act="src" data-k="${k}">${l} (${n})</button>`).join('')}</div>
+    <div class="grid g4" style="grid-template-columns:2fr 1fr 1.4fr 1fr">
+      <input type="search" id="libQ" placeholder="${libState.src === 'bank' ? 'Tìm câu hỏi theo chữ Hán, pinyin, tiếng Việt, thẻ…' : 'Tìm theo tên hoặc nội dung…'}" value="${esc(libState.q)}">
+      <select id="libHsk">${hskOptions(libState.hsk, true)}</select>
+      <select id="libTopic" ${['set', 'bank'].includes(libState.src) ? '' : 'disabled title="Chỉ áp dụng cho Bộ đề và Ngân hàng câu hỏi"'}>${topicOptions(libState.topic, true)}</select>
+      <select id="libCam"><option value="">Mọi kiểu điều khiển</option><option value="hand" ${libState.cam === 'hand' ? 'selected' : ''}>✋ Dùng tay</option><option value="face" ${libState.cam === 'face' ? 'selected' : ''}>🙂 Dùng khuôn mặt</option><option value="pose" ${libState.cam === 'pose' ? 'selected' : ''}>🧍 Dùng cơ thể</option></select>
+    </div>
+    ${libState.src === 'bank' ? `<p class="small" style="margin:12px 0 0">Có <b>${cur.qs.length}</b> câu hỏi phù hợp bộ lọc. Trò chơi sẽ lấy câu từ nhóm này.</p>`
+      : list.length ? `<div class="row" style="margin-top:12px;max-height:190px;overflow:auto;align-items:stretch">${list.slice(0, 60).map(x => `<button class="btn" data-act="pick" data-id="${x.id}" style="flex-direction:column;align-items:flex-start;gap:2px;white-space:normal;max-width:300px;${cur && x.id === libState.pick ? 'border-color:var(--teal);background:var(--teal-l)' : ''}"><span>${esc(x.name)}</span><span class="tiny muted" style="font-weight:500">HSK ${x.hsk} · ${esc(x.info)}</span></button>`).join('')}</div>${list.length > 60 ? `<p class="tiny muted">Đang hiện 60/${list.length} kết quả — hãy gõ thêm từ khóa để thu hẹp.</p>` : ''}`
+      : `<div class="empty small">Không tìm thấy ${libState.src === 'set' ? 'bộ đề' : libState.src === 'lesson' ? 'bài học' : 'tài liệu'} phù hợp bộ lọc.</div>`}
+    ${libState.src === 'lesson' || libState.src === 'material' ? '<p class="tiny muted" style="margin:8px 0 0">Bài học và tài liệu: mỗi lượt chơi sinh câu hỏi mới từ nội dung gốc.</p>' : ''}
+  </div>
+  <div class="card" style="margin-bottom:12px"><h3 style="margin:0">2. Chọn trò chơi ${cur ? `<span class="small muted" style="font-weight:500">— nguồn: ${esc(cur.label)}</span>` : ''}</h3>
+    ${cur ? `<p class="small muted" style="margin:4px 0 0">${ok.length} trò chơi được với nội dung này${no.length ? `, ${no.length} trò chưa đủ dữ liệu (hiện mờ ở cuối)` : ''}.</p>` : '<p class="small muted" style="margin:4px 0 0">Hãy chọn một nguồn câu hỏi ở trên.</p>'}</div>
+  ${cur ? `<div class="games" id="gameGrid">${ok.map(c => `<button class="gcard" data-game="${c.g.id}"><div class="row between"><div class="gi" style="background:${c.g.color}">${c.g.icon}</div><span class="pill ok">${c.n} câu</span></div><h4>${esc(c.g.name)}</h4><p>${esc(c.g.desc)}</p><div class="row"><span class="pill t">${CAM_LABEL(c.g.models)}</span><span class="pill v">${esc(c.g.kindLabel)}</span>${inLesson(c.g.id) ? '<span class="pill">📘 Trong bài học</span>' : ''}${c.note ? '<span class="pill warn">Dùng hình mẫu</span>' : ''}</div></button>`).join('')}
+    ${no.map(c => `<div class="gcard" style="opacity:.45;cursor:not-allowed" title="Cần: ${esc(c.g.kindLabel)}"><div class="row between"><div class="gi" style="background:${c.g.color}">${c.g.icon}</div><span class="pill bad">Chưa đủ dữ liệu</span></div><h4>${esc(c.g.name)}</h4><p>Cần nội dung dạng: ${esc(c.g.kindLabel)}.</p></div>`).join('')}</div>` : ''}`;
+  const rerender = (keepFocus) => { Pages.library(); if (keepFocus) { const e = $('#libQ'); e.focus(); e.setSelectionRange(e.value.length, e.value.length); } };
+  let t; $('#libQ').addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { libState.q = $('#libQ').value; libState.pick = ''; rerender(true); }, 350); });
+  $('#libHsk').onchange = (e) => { libState.hsk = e.target.value; libState.pick = ''; rerender(); };
+  $('#libTopic').onchange = (e) => { libState.topic = e.target.value; libState.pick = ''; rerender(); };
+  $('#libCam').onchange = (e) => { libState.cam = e.target.value; rerender(); };
+  bindActs($('#view'), {
+    src: (el) => { libState.src = el.dataset.k; libState.pick = ''; rerender(); },
+    pick: (el) => { libState.pick = el.dataset.id; rerender(); },
+  });
+  if ($('#gameGrid')) $('#gameGrid').addEventListener('click', (e) => { const c = e.target.closest('button[data-game]'); if (c && cur) cur.open(GAMES.find(g => g.id === c.dataset.game)); });
+};
 /* =====================================================================
    QUẢN LÝ LỚP HỌC & HỌC SINH
    ===================================================================== */
