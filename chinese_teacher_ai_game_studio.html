@@ -1171,6 +1171,55 @@ const Store = {
 function settingsForStorage() { const s = structuredClone(S.settings); if (!s.ai.remember) s.ai.key = ''; return s; }
 function mergeDeep(base, over) { const out = structuredClone(base); if (!over || typeof over !== 'object') return out; Object.keys(over).forEach(k => { if (over[k] && typeof over[k] === 'object' && !Array.isArray(over[k]) && base[k] && typeof base[k] === 'object') out[k] = mergeDeep(base[k], over[k]); else if (over[k] !== undefined) out[k] = over[k]; }); return out; }
 
+
+/* ---------- ĐỒNG BỘ TỪ data.json TRÊN GITHUB PAGES ----------
+   Mỗi lần mở trang (qua http/https), ứng dụng tải data.json cùng thư mục,
+   rồi GỘP vào dữ liệu của máy này:
+   - Mục chưa có trên máy  -> thêm vào.
+   - Mục đã có (cùng id)   -> chỉ cập nhật khi data.json là bản xuất mới hơn lần đã nạp trước.
+   Không đụng tới lớp học, học sinh, lịch sử chơi và cài đặt của từng máy. */
+const REMOTE_FILE = 'data.json';
+const REMOTE_KEYS = ['questions', 'vocab', 'sets', 'materials', 'lessons'];
+const Remote = {
+  status: '',
+  async fetchData() {
+    if (!/^https?:$/.test(location.protocol)) throw new Error('Đang mở trực tiếp từ ổ đĩa (file://), không tải được data.json. Hãy mở bằng link https.');
+    const ctl = new AbortController(); const tm = setTimeout(() => ctl.abort(), 20000);
+    try {
+      const res = await fetch(new URL(REMOTE_FILE, location.href).href, { cache: 'no-cache', signal: ctl.signal });
+      if (res.status === 404) throw new Error('Chưa có file data.json trên GitHub (cùng thư mục với file HTML).');
+      if (!res.ok) throw new Error('Tải data.json lỗi HTTP ' + res.status);
+      let j; try { j = await res.json(); } catch (e) { throw new Error('data.json không phải JSON hợp lệ.'); }
+      if (!j || j.app !== 'CTAGS' || j.kind !== 'backup' || !j.data) throw new Error('data.json không phải bản sao lưu của ứng dụng (hãy dùng nút “Sao lưu toàn bộ (JSON)”).');
+      return j;
+    } catch (e) { throw e.name === 'AbortError' ? new Error('Tải data.json quá lâu (hết thời gian chờ).') : e; }
+    finally { clearTimeout(tm); }
+  },
+  /** force = true: ghi đè cả mục đã có (dùng cho nút "Đồng bộ ngay") */
+  async sync(force = false) {
+    const j = await this.fetchData(); const d = j.data;
+    const stamp = String(j.exportedAt || '');
+    let applied; try { applied = await Store.get('remoteApplied'); } catch (e) { applied = undefined; }
+    const overwrite = force || (stamp && stamp !== applied);
+    const sum = { added: 0, updated: 0 };
+    for (const k of REMOTE_KEYS) {
+      if (d[k] == null) continue;
+      if (!Array.isArray(d[k])) throw new Error(`Mục “${k}” trong data.json không đúng định dạng.`);
+      const incoming = k === 'questions' ? d[k].filter(q => q && q.id && q.type).map(q => Core.makeQ(q)) : d[k].filter(x => x && x.id);
+      const idx = new Map(S[k].map((x, i) => [x.id, i])); let changed = false;
+      for (const it of incoming) {
+        if (!idx.has(it.id)) { S[k].push(it); idx.set(it.id, S[k].length - 1); sum.added++; changed = true; }
+        else if (overwrite) { const i = idx.get(it.id); if (JSON.stringify(S[k][i]) !== JSON.stringify(it)) { S[k][i] = it; sum.updated++; changed = true; } }
+      }
+      if (changed) await Store.saveNow(k);
+    }
+    if (stamp) await Store.put('remoteApplied', stamp);
+    const when = stamp ? new Date(stamp).toLocaleString('vi-VN') : '?';
+    this.status = `Đã kiểm tra data.json (bản xuất ${when}): thêm ${sum.added}, cập nhật ${sum.updated}.`;
+    return sum;
+  },
+};
+
 function seedData() {
   const seed = Core.buildSeed();
   S.vocab = seed.vocab; S.questions = seed.questions.slice();
@@ -3949,6 +3998,8 @@ Pages.settings = () => {
       <div class="card"><h3>Dữ liệu</h3>
         <p class="small">Lưu trữ: <b>${Store.mode === 'idb' ? 'IndexedDB' : 'localStorage'}</b> · ${S.questions.length} câu hỏi · ${S.sets.length} bộ đề · ${S.classes.length} lớp · ${S.students.length} học sinh · ${S.history.length} lượt chơi <span id="quota"></span></p>
         <div class="row"><button class="btn primary" data-act="backup">⬇️ Sao lưu toàn bộ (JSON)</button><button class="btn" data-act="restore">⬆️ Phục hồi từ JSON</button></div>
+        <div class="row" style="margin-top:10px"><button class="btn" data-act="syncRemote">🔄 Đồng bộ ngay từ data.json (GitHub)</button></div>
+        <p class="tiny muted" id="syncStatus">${esc(Remote.status || 'Mỗi lần mở trang, ứng dụng tự nạp data.json cùng thư mục trên GitHub Pages.')}</p>
         <div class="row" style="margin-top:10px"><button class="btn sm" data-act="reseed">Nạp lại dữ liệu HSK mẫu</button><button class="btn sm danger" data-act="clearHist">Xóa lịch sử kết quả</button><button class="btn sm danger" data-act="wipe">Xóa toàn bộ dữ liệu</button></div>
         <p class="tiny muted">Ứng dụng không lưu hình ảnh hay video từ camera. Dữ liệu chỉ nằm trên trình duyệt của máy này — hãy sao lưu định kỳ.</p>
       </div>
@@ -3995,6 +4046,11 @@ Pages.settings = () => {
         toast('Đã phục hồi dữ liệu.', 'ok'); Pages.settings(); renderNav();
       } catch (e) { toast('Không phục hồi được: ' + e.message + ' Dữ liệu hiện tại không bị thay đổi.', 'bad', 7000); }
     },
+    syncRemote: async () => {
+      const el = $('#syncStatus'); if (el) el.textContent = 'Đang tải data.json…';
+      try { const r = await Remote.sync(true); toast(`Đồng bộ xong: thêm ${r.added}, cập nhật ${r.updated} mục.`, 'ok', 4500); Pages.settings(); renderNav(); }
+      catch (e) { Remote.status = 'Chưa đồng bộ data.json: ' + e.message; if (el) el.textContent = Remote.status; toast('Không đồng bộ được: ' + e.message, 'bad', 7000); }
+    },
     reseed: async () => { if (!(await Modal.confirm('Nạp lại câu hỏi, từ vựng và bộ đề HSK mẫu? Dữ liệu của bạn được giữ nguyên; các mục mẫu cũ sẽ được thay mới.', 'Nạp lại'))) return; const mine = { q: S.questions.filter(q => !/^Mẫu HSK/.test(q.source)), v: S.vocab.filter(v => v.source !== 'Mẫu HSK'), s: S.sets.filter(s => !s.sample) }; seedData(); S.questions = [...S.questions, ...mine.q]; S.vocab = [...S.vocab, ...mine.v]; S.sets = [...S.sets, ...mine.s]; await Store.saveNow('questions'); await Store.saveNow('vocab'); await Store.saveNow('sets'); await Store.saveNow('lessons'); toast('Đã nạp lại dữ liệu mẫu.', 'ok'); Pages.settings(); },
     clearHist: async () => { if (await Modal.confirm('Xóa toàn bộ lịch sử kết quả và bảng xếp hạng? Không thể hoàn tác (hãy sao lưu trước).', 'Xóa lịch sử', true)) { S.history = []; S.usage = {}; await Store.saveNow('history'); await Store.saveNow('usage'); toast('Đã xóa lịch sử.', 'ok'); Pages.settings(); } },
     wipe: async () => { if (await Modal.confirm('Xóa TOÀN BỘ dữ liệu (câu hỏi, bộ đề, lớp, học sinh, lịch sử, cài đặt) và nạp lại dữ liệu mẫu? Không thể hoàn tác.', 'Xóa toàn bộ', true)) { KEYS.forEach(k => { S[k] = k === 'settings' ? structuredClone(DEFAULT_SETTINGS) : k === 'usage' ? {} : []; }); seedData(); for (const k of KEYS) await Store.saveNow(k); try { localStorage.removeItem('ctags_draft'); } catch (e) { /* bỏ qua */ } Gen.text = ''; Gen.questions = []; toast('Đã xóa và nạp lại dữ liệu mẫu.', 'ok'); go('dashboard'); } },
@@ -4025,6 +4081,13 @@ async function boot() {
   window.addEventListener('beforeunload', () => { KEYS.forEach(k => { if (Store.timers[k]) { clearTimeout(Store.timers[k]); Store.put(k, k === 'settings' ? settingsForStorage() : S[k]); } }); Cam.stop(); });
   const start = (location.hash || '').slice(1);
   go(Pages[start] && start !== 'room' ? start : 'dashboard');
+  // Tự nạp data.json từ GitHub (không chặn việc mở ứng dụng; lỗi mạng/404 được bỏ qua êm)
+  Remote.sync().then(r => {
+    if (r.added || r.updated) {
+      toast(`Đã cập nhật từ data.json: thêm ${r.added}, cập nhật ${r.updated} mục.`, 'ok', 5000);
+      if (currentPage !== 'room' && !Modal.stack.length) go(currentPage); else renderNav();
+    }
+  }).catch(e => { Remote.status = 'Chưa đồng bộ data.json: ' + e.message; console.info(Remote.status); });
 }
 boot().catch(e => { console.error(e); document.body.insertAdjacentHTML('afterbegin', `<div class="notice bad" style="margin:10px">Ứng dụng gặp lỗi khi khởi động: ${esc(e.message)}. Hãy tải lại trang; nếu lỗi lặp lại, dùng Cài đặt → Sao lưu rồi xóa dữ liệu.</div>`); });
 })();
