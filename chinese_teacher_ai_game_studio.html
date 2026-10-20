@@ -3623,6 +3623,108 @@ defGame({
     hint: (inp, ex) => inp.hands.length >= 2 ? `Vô-lăng: ${Math.round(ex.steer || 0)}°` : inp.hands.length === 1 ? 'Một tay: đặt tay ở làn muốn chạy' : 'Giơ hai tay như cầm vô-lăng · hoặc phím ← →',
   }),
 });
+
+/* ---------- 21–24. Trò chơi lớp học (ý tưởng từ game PowerPoint: chạm/chuột là chính, camera tay tùy chọn) ---------- */
+function classGame(build) {
+  return (s) => {
+    const zp = zonePicker(s), st = build(s); let zones = [], seen = -1;
+    return {
+      setDwell: (ms) => { zp.dw.ms = ms; },
+      onQuestion() { zp.dw.reset(); seen = -1; st.onQuestion && st.onQuestion(); },
+      update(dt, inp) {
+        const q = s.current; if (!q) return;
+        zones = st.zones(q, inp); st.update && st.update(dt, inp, q);
+        if (st.click && inp.click && !s.locked && st.click(inp.click)) inp.click = null;
+        zp.update(dt, inp, zones, (i) => s.submit(i));
+        if (s.locked && seen !== s.idx) { seen = s.idx; st.result(s.lastChoice === q.answer, s.lastChoice); }
+      },
+      draw(ctx, W, H, inp) {
+        const q = s.current; if (!q) return; st.back && st.back(ctx, W, H, inp);
+        zones.forEach((z, i) => z.w > 0 && Draw.zone(ctx, z, LETTERS[i], q.options[i], zp.prog.zone === i ? zp.prog.p : 0, zState(s, i), zp.hover === i));
+        st.front && st.front(ctx, W, H, inp, zones); Draw.cursor(ctx, handPtr(inp), zp.prog.p);
+      },
+      onKey(e) { const k = keyIndex(e); if (k != null && s.current && zones[k] && zones[k].w > 0) { s.submit(k); return true; } return false; },
+    };
+  };
+}
+const bottomZones = (n, W, H, top) => { const h = Math.min(120, (H - top) * .28); return rowZones(n, W, H, H - h - 14, h); };
+const PRIZES = [100, 200, 300, 500, 1000, 2000, 4000, 8000, 16000, 32000, 64000, 125000, 250000, 500000, 1000000];
+
+defGame({
+  id: 'millionaire', num: 21, icon: '💰', color: '#fff3d6', name: 'Triệu phú học đường', models: [], kind: 'mcq',
+  desc: 'Leo thang tiền thưởng như chương trình truyền hình. Có quyền trợ giúp 50:50 một lần mỗi câu hỏi mới đầu phiên.',
+  how: 'Chọn đáp án A–D. Mỗi câu đúng leo lên một bậc. Sai thì tụt về mốc an toàn (bậc 5, 10). Bấm 50:50 để loại hai đáp án sai (dùng một lần).',
+  controls: 'Dùng chuột/chạm, hoặc đưa ngón trỏ vào ô và giữ nếu bật camera tay.', fallback: 'Phím 1–4 / A–D; phím 5 để dùng 50:50.',
+  create: classGame((s) => ({
+    hid: new Set(), used: false, lvl: 0, q: null, btn: null,
+    onQuestion() { this.hid = new Set(); },
+    zones(q, inp) { this.q = q; this.btn = { x: inp.W * .8, y: inp.H - 66, w: inp.W * .18, h: 50 }; return cornerZones(q.options.length, inp.W * .76, inp.H, inp.top).map((z, i) => this.hid.has(i) ? { x: -9999, y: 0, w: 0, h: 0 } : z); },
+    click(p) { if (this.used || !inRect(p, this.btn)) return false; this.used = true; const wrong = this.q.options.map((_, i) => i).filter(i => i !== this.q.answer).sort(() => Math.random() - .5).slice(0, 2); wrong.forEach(i => this.hid.add(i)); SFX.play('select'); return true; },
+    result(ok) { if (ok) { this.lvl = Math.min(this.lvl + 1, 15); if (this.lvl === 15) { Room.flash('🎉 Triệu phú! Bắt đầu lại từ đầu', 'ok'); this.lvl = 0; } } else this.lvl = Math.floor(this.lvl / 5) * 5; },
+    front(ctx, W, H, inp) {
+      const x = W * .8, w = W * .18, rows = 8, top = inp.top + 10, rh = Math.min(34, (H - top - 90) / rows), base = Math.max(0, Math.min(this.lvl - 2, 15 - rows));
+      for (let r = 0; r < rows; r++) { const i = base + rows - 1 - r; if (i > 14) continue; const y = top + r * rh, cur = i === this.lvl, got = i < this.lvl; ctx.save(); ctx.fillStyle = cur ? '#ffd166' : got ? 'rgba(20,160,88,.85)' : 'rgba(255,255,255,.85)'; Draw.rr(ctx, x, y, w, rh - 4, 8); ctx.fill(); ctx.restore(); Draw.fit(ctx, `${i + 1}. ${PRIZES[i].toLocaleString('vi-VN')}`, x + w / 2, y + rh / 2 - 2, w - 8, rh - 6, 15, got ? '#fff' : '#123540'); }
+      Draw.zone(ctx, this.btn, '', this.used ? '—' : '50:50', 0, this.used ? 'bad' : '', inRect(inp.pointer, this.btn) && !this.used);
+    },
+  })),
+});
+
+defGame({
+  id: 'wolf-sheep', num: 22, icon: '🐺', color: '#dcf7e8', name: 'Sói đến rồi – bảo vệ đàn cừu', models: [], kind: 'mcq',
+  desc: 'Trả lời đúng để đuổi sói: mỗi câu đúng làm sói bị thương, trả lời sai thì sói tiến sát đàn cừu.',
+  how: 'Chọn đáp án đúng. Sói có 5 máu; hết máu thì bị đuổi đi. Nếu sói chạm tới đàn cừu, ván chơi của sói được làm lại.',
+  controls: 'Chuột/chạm, hoặc đầu ngón trỏ + giữ nếu bật camera tay.', fallback: 'Phím 1–4 / A–D.',
+  create: classGame((s) => ({
+    hp: 5, dist: 1, wx: 1, hit: 0,
+    zones: (q, inp) => bottomZones(q.options.length, inp.W, inp.H, inp.top),
+    update(dt) { this.wx += (this.dist - this.wx) * Math.min(1, dt * 4); this.hit = Math.max(0, this.hit - dt); },
+    result(ok) {
+      if (ok) { this.hp--; this.hit = .6; this.dist = Math.min(1, this.dist + .12); if (this.hp <= 0) { Room.flash('🎉 Sói bị đuổi đi!', 'ok'); this.hp = 5; this.dist = 1; } }
+      else { this.dist -= .24; if (this.dist <= .05) { Room.flash('😱 Sói vào làng rồi! Chơi lại nhé', 'bad'); this.hp = 5; this.dist = 1; } }
+    },
+    back(ctx, W, H, inp) {
+      const h = Math.min(120, (H - inp.top) * .28), y = inp.top + (H - inp.top - h - 28) / 2; ctx.save(); ctx.fillStyle = 'rgba(120,200,120,.35)'; Draw.rr(ctx, 14, inp.top + 6, W - 28, H - inp.top - h - 40, 18); ctx.fill(); ctx.restore();
+      drawEmoji(ctx, '🐑', W * .1, y, 56); drawEmoji(ctx, '🐑', W * .17, y + 14, 44); drawEmoji(ctx, '🌳', W * .04, y - 10, 50);
+      const wx = W * .26 + this.wx * W * .6; drawEmoji(ctx, '🐺', wx, y, 72); if (this.hit > 0) drawEmoji(ctx, '💥', wx - 36, y - 30, 44);
+      Draw.label(ctx, 'Máu sói: ' + '❤️'.repeat(Math.max(0, this.hp)), W / 2, inp.top + 26, 16);
+    },
+  })),
+});
+
+defGame({
+  id: 'egg-smash', num: 23, icon: '🥚', color: '#fde6e6', name: 'Đập trứng điền từ', models: [], kind: 'mcq',
+  desc: 'Mỗi đáp án nằm trong một quả trứng. Đập đúng quả để nở ra chú gà con, đập sai thì thành trứng ốp la.',
+  how: 'Đọc câu có chỗ trống rồi bấm vào quả trứng chứa đáp án đúng. Đập xong, quả trứng cho biết kết quả.',
+  controls: 'Chuột/chạm, hoặc đầu ngón trỏ + giữ nếu bật camera tay.', fallback: 'Phím 1–4 / A–D.',
+  create: classGame((s) => ({
+    zones: (q, inp) => bottomZones(q.options.length, inp.W, inp.H, inp.top),
+    result() {},
+    front(ctx, W, H, inp, zones) {
+      const q = s.current; zones.forEach((z, i) => { let e = '🥚'; if (s.locked) e = i === s.lastChoice ? (s.lastChoice === q.answer ? '🐥' : '🍳') : (i === q.answer && s.lastChoice !== q.answer ? '🐥' : '🥚'); drawEmoji(ctx, e, z.x + z.w / 2, z.y - 46, 70); });
+    },
+  })),
+});
+
+defGame({
+  id: 'tug-of-war', num: 24, icon: '🪢', color: '#e3f3fd', name: 'Kéo co kiến thức', models: [], kind: 'mcq',
+  desc: 'Đội bạn kéo co với robot: trả lời đúng kéo cờ về phía mình, trả lời sai bị robot kéo lại.',
+  how: 'Mỗi câu đúng kéo cờ một nấc về bên đội bạn (bên trái). Kéo cờ chạm vạch thắng để thắng ván; sai thì cờ bị kéo về phía robot.',
+  controls: 'Chuột/chạm, hoặc đầu ngón trỏ + giữ nếu bật camera tay. Chơi theo nhóm: mỗi nhóm một lượt.', fallback: 'Phím 1–4 / A–D.',
+  create: classGame((s) => ({
+    pos: 0, vis: 0,
+    zones: (q, inp) => bottomZones(q.options.length, inp.W, inp.H, inp.top),
+    update(dt) { this.vis += (this.pos - this.vis) * Math.min(1, dt * 5); },
+    result(ok) { this.pos += ok ? .25 : -.25; if (this.pos >= 1) { Room.flash('🎉 Đội bạn thắng!', 'ok'); this.pos = 0; } else if (this.pos <= -1) { Room.flash('🤖 Robot thắng — thử lại nhé', 'bad'); this.pos = 0; } },
+    back(ctx, W, H, inp) {
+      const h = Math.min(120, (H - inp.top) * .28), y = inp.top + (H - inp.top - h - 28) / 2, fx = W / 2 - this.vis * W * .34;
+      ctx.save(); ctx.strokeStyle = '#a0682b'; ctx.lineWidth = 8; ctx.beginPath(); ctx.moveTo(W * .12, y); ctx.lineTo(W * .88, y); ctx.stroke(); ctx.setLineDash([6, 6]); ctx.strokeStyle = '#e1484d'; ctx.lineWidth = 3;
+      [W / 2 - W * .34, W / 2 + W * .34].forEach(x => { ctx.beginPath(); ctx.moveTo(x, y - 50); ctx.lineTo(x, y + 50); ctx.stroke(); }); ctx.restore();
+      drawEmoji(ctx, '🧑‍🎓', W * .09, y, 60); drawEmoji(ctx, '🤖', W * .91, y, 60); drawEmoji(ctx, '🚩', fx, y - 20, 52);
+      Draw.label(ctx, 'Đội bạn', W * .09, y + 52, 14); Draw.label(ctx, 'Robot', W * .91, y + 52, 14);
+    },
+  })),
+});
+
 /* =====================================================================
    BÀI HỌC — lưu nội dung gốc của bài, mỗi lượt chơi sinh đề MỚI:
    chọn ngẫu nhiên dạng câu hỏi, phương án nhiễu, vị trí đáp án và ưu tiên
